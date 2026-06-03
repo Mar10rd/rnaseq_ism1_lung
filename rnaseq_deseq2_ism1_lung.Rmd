@@ -1,0 +1,312 @@
+---
+title: "RNA-seq Analysis of Ism1-/- Mouse Lung Tissue (GSE262122)"
+author: "Mario Antonio Rodriguez Diaz"
+date: "2026-03-21"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+
+```{r setup, include=FALSE}
+# rnaseq_deseq2_ism1_lung.Rmd
+# RNA-seq differential expression analysis: Ism1-/- vs Wild Type (GSE262122)
+# Dataset: Mus musculus lung tissue, postnatal day 7, Illumina NovaSeq 6000
+#
+# Author: Mario Antonio Rodriguez Diaz
+# MSc Bioinformatics, University of Edinburgh, 2025-2026
+# Functional Genomic Technologies coursework
+# Adapted from class template (Tomlinson, University of Edinburgh)
+
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r init, echo=FALSE}
+# Code adapted from class template: example_analysis_GSE243520.Rmd
+# (Tomlinson, University of Edinburgh, 2026)
+#Load the required libraries & files
+library(Rsubread)
+library(edgeR)
+library(limma)
+library(gplots)
+library(DESeq2)
+library(affy)
+library(QuasR)
+library(pheatmap)
+
+load("mytable_feaures")
+
+```
+
+Once we have loaded the data we are ready to run some further analysis.
+```{r input_processing, echo=FALSE}
+#Some further processing to access count data and column names.
+table_rnaseq<-(mytable_feaures)$counts 
+colnames_rnaseq <-colnames(table_rnaseq)
+
+#Here I generate an 'adf data frame' for the annotation.  
+adf <-data.frame(Colnames =colnames_rnaseq)
+library(stringr)
+locc <- str_locate_all(pattern="Aligned.sortedByCoord.out.bam",adf$Colnames)
+adf$ShortGEOName <-substr(adf$Colnames,1,locc[[1]][,"start"]-1)
+
+#From the GEO page for this study-https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE262122
+#GSM8157908 	WT_1
+#GSM8157909 	WT_2
+#GSM8157910 	WT_3
+#GSM8157911 	Ism1_1
+#GSM8157912 	Ism1_2
+#GSM8157913 	Ism1_3
+
+#My samples are in the same order as the annotation so I can just create some short names and add to annotation
+adf$ShortNames <-c("WT_1", "WT_2", "WT_3", "Ism1_1", "Ism1_2", "Ism1_3")
+
+#while I am doing this I will create a factor for the genotype
+split_names <-str_split(adf$ShortNames, pattern="_")
+genotype <-c()
+for(i in 1:length(split_names)){
+  genotype <-c(genotype,split_names[[i]][1])
+}
+# Creating new Genotype col in adf as a factor, specifying that "WT" is the control
+adf$Genotype <- factor(genotype,levels = c("WT","Ism1")) 
+
+#Add some colours as well
+#See https://stackoverflow.com/questions/42288075/how-to-autogenerate-color-vector-from-a-numeric-vector
+z <- adf$Genotype # no need to specify that Z is a factor because col Genotype was created as a factor
+adf$Colours <-rainbow(length(levels(z)))[z]
+
+
+#make sure the colnames of the study match the rownames of the annotation...
+rownames(adf) <-adf$Colnames
+if(identical(colnames_rnaseq,rownames(adf))==FALSE){
+  print("Names do not match")
+}else{
+  print("Names match.. OK to proceed")
+}
+
+#OK switch to shortnames to help with the figures
+#We can only swap this way because column order to consistent with adf
+rownames(adf) <-adf$ShortNames
+colnames(table_rnaseq) <-adf$ShortNames
+
+colnames_rnaseq <-colnames(table_rnaseq)
+
+```
+
+## Loading the Data into DESeq
+DESeq2 will used for the statistical analysis and the normalization of the data. 
+```{r loading_deseq, echo=FALSE}
+#Create object for DESeq
+#NOTE the design for differential analysis is fed into this object 
+dds_rnaseq <- DESeqDataSetFromMatrix(countData = table_rnaseq,colData = adf,design = ~ Genotype)
+#check the object dimensions
+dim(dds_rnaseq)
+head(rownames(dds_rnaseq))
+colnames(dds_rnaseq)
+#check the object type
+class(dds_rnaseq)
+typeof(dds_rnaseq)
+
+#check what this object contains
+slotNames(dds_rnaseq)
+colnames(colData(dds_rnaseq))
+colnames(assay(dds_rnaseq))
+
+```
+Quality Filtering Genes
+Apply filters to remove genes that do not pass quality filters.
+
+```{r apply_filters, echo=FALSE}
+#first filter based upon counts
+keep <- rowSums(counts(dds_rnaseq)) > 1
+dds_rnaseq <- dds_rnaseq[keep,]
+nrow(dds_rnaseq)
+```
+
+## Normalisation of Data
+
+```{r normalisation, echo=TRUE}
+#size factor estimation for normalisation- these are used to scale by library size when data is exported.
+dds_rnaseq <- estimateSizeFactors(dds_rnaseq)
+sizeFactors(dds_rnaseq)
+
+```
+
+We will use rlog normalisation
+```{r plot_normalised, echo=FALSE}
+
+rld_rnaseq <- rlog(dds_rnaseq, blind = T)
+head(rld_rnaseq, 3)
+
+
+```
+
+Plotting normalisation
+```{r build_plots, echo=FALSE}
+#Splitting screen in 1 row, 2 cols
+par(mfrow = c(1, 2))
+
+#Plotting rlog normalised data
+boxplot(assay(rld_rnaseq),
+        col = adf$Colours, 
+        main = "Normalised data (rlog)",
+        ylab = "rlog Counts",
+        las = 2)
+
+#Plotting non-normalised data
+counts_un <-counts(dds_rnaseq, normalized=FALSE)+1
+boxplot(log2(counts_un),
+        col = adf$Colours, 
+        main = "Non-normalised data (Log2)",
+        ylab = "log2(counts + 1)",
+        las = 2)
+```
+
+Exploratory Data Plots
+```{r more_explore, echo=FALSE}
+#we can run a PCA plot here...
+library(scatterplot3d)
+library(ggplot2)
+# Perform PCA
+pca <- prcomp(t(na.omit(assay(rld_rnaseq))), scale=T)
+# Plot the PCA results
+s3d<-scatterplot3d(pca$x[,1:3], pch=19, color=adf$Colours,
+                   main="3D Principal Component Analysis")
+s3d.coords <- s3d$xyz.convert(pca$x[,1:3])
+text(s3d.coords$x, s3d.coords$y, labels = colnames(rld_rnaseq),pos = 3,offset = 0.5,cex=0.5)
+#or a quick plot in 2d
+qplot(pca$x[,1],pca$x[,2],xlab="PCA1", ylab="PCA2",color=adf$Genotype,
+      main="PCA: Ism1 Mutant vs Wild Type")
+#We can also output a distance matrix…
+sampleDists <- dist(t(assay(rld_rnaseq)))
+sampleDists
+
+```
+## Generate further heatmaps with the data
+
+```{r more_heatmaps, echo=FALSE}
+library("pheatmap")
+library("RColorBrewer")
+sampleDistMatrix <- as.matrix(sampleDists)
+pheatmap(sampleDistMatrix, main = "Sample-to-Sample Distance Heatmap")
+#easier PCA plot
+ress <-plotPCA(rld_rnaseq, intgroup = c("Genotype"))
+ress <- ress + geom_label(aes(label = name))+
+  ggtitle("PCA Cluster Map: Genotype Comparison")
+plot(ress)
+```
+## Differential Gene Expression
+Simplified stats
+
+```{r differential_expression, echo=FALSE}
+dds_rnaseq <- DESeq(dds_rnaseq)
+
+#This is how you specify a contrast…
+result_treatment <-results(dds_rnaseq,contrast=c("Genotype","Ism1","WT"))
+#Checking range of L2FC to further MA plot
+range(result_treatment$log2FoldChange)
+#make a nice plot of differential expression
+plotMA(result_treatment, main="MA Plot: Ism1-/- vs WT", ylim=c(-6.5,6.5), alpha = 0.05)
+#Counting number of results for different thresholds
+table(result_treatment$pvalue < 0.05)
+table(result_treatment$padj < 0.05)
+#Ranking result_treatment by the absolute value of stat (decreasing)
+#Genes with the largest change (both up-regulated and down-regulated) are ranked first
+result_treatment <-result_treatment[order(abs(result_treatment$stat),decreasing = TRUE), ]
+head(result_treatment)
+
+#Saving results as csv
+write.csv(as.data.frame(result_treatment),"result_treatment_sorted_not_ann.csv")
+
+```
+
+## Make heatmaps for top70 out of best results
+
+```{r differential_expression_heatmaps, echo=FALSE}
+
+top70 <-rownames(result_treatment)[1:70]
+#make a heatmap for the top 70
+pheatmap(assay(rld_rnaseq)[top70,],scale="row",show_rownames=F,main="RLD values, Row Scaled, Top 70")
+
+```
+## Build Gene Annotation. A serialised is generated in case Ensembl is unavailable
+
+```{r build_gene_annotation, echo=TRUE}
+#Download Ensembl annotation using BiomaRt and rename the samples
+library(biomaRt)
+if(file.exists("resultAnnot.RData")){
+
+  load("resultAnnot.RData")
+  print("Loaded existing Ensembl annotation...")
+}else{
+  
+  #UK ensembl is being updated  we use a USA mirror, "useast.ensembl.org"
+  ensembl_host <-"https://www.ensembl.org"
+  
+  # Requesting fewer attributes so that the connection to Ensemble does not get interrupted 
+  mart <- biomaRt::useDataset(dataset = "mmusculus_gene_ensembl",mart    = useMart("ENSEMBL_MART_ENSEMBL",host    = ensembl_host))
+  resultAnnot <- biomaRt::getBM(values=rownames(dds_rnaseq),attributes =     c("ensembl_gene_id","external_gene_name","chromosome_name","description"),filters="ensembl_gene_id",mart=mart)
+  save(resultAnnot,file="resultAnnot.RData")
+}
+
+```
+
+Merge Annotation with Input Data
+```{r merge_gene_annotation, echo=FALSE}
+#merge with input data
+names <- resultAnnot[,1]
+resultAnnot <- as.data.frame(resultAnnot)
+rownames(resultAnnot) = names
+idx<-match(rownames(dds_rnaseq),rownames(resultAnnot))
+#make sure annotation is in same order
+all(rownames(dds_rnaseq) == rownames(resultAnnot))
+grr<-resultAnnot[match(rownames(dds_rnaseq), resultAnnot$ensembl_gene_id),]
+all(rownames(dds_rnaseq) == rownames(grr))
+resultAnnot <-grr
+all(rownames(dds_rnaseq) == rownames(resultAnnot))
+#make the nice names
+nice_names<-paste(resultAnnot$ensembl_gene_id,resultAnnot$external_gene_name, sep = '_')
+resultAnnot$nice_names <-nice_names
+head(resultAnnot)
+all(rownames(dds_rnaseq) == rownames(resultAnnot))
+#check names
+# Changed to create heatmap for top40
+rld_rnaseq <- rlog(dds_rnaseq, blind = TRUE)#
+idx2 <-match(rownames(result_treatment)[1:40],rownames(dds_rnaseq))
+plotme <-(rld_rnaseq)[rownames(result_treatment)[1:40],]
+rownames(plotme)<-resultAnnot$nice_names[idx2]
+#make heatmap with candidate genes
+pheatmap(assay(plotme),scale="row",fontsize_col = 5, fontsize_row = 5,cellheight =6, 
+         cellwidth =6,treeheight_row = 60, treeheight_col = 20)
+```
+## Final Results Table
+Since we have annotation that matches gene names to candidates we can also annotate the results table from differential expression
+
+```{r merge_gene_annotation2, echo=FALSE}
+
+#this has the results ordered
+
+#before 
+head(result_treatment,50)
+
+idx2 <-match(rownames(result_treatment),rownames(resultAnnot))
+
+# Create a temporary vector of names
+new_names <- resultAnnot$nice_names[idx2]
+
+# If a name is NA, replace it with the original Ensembl ID from the row names
+new_names[is.na(new_names)] <- rownames(result_treatment)[is.na(new_names)]
+# -------------------------------------
+
+# 2. Assign the cleaned names back to the results
+rownames(result_treatment) <- new_names
+#after
+print(result_treatment[1:50,])
+
+#Saving results as csv
+write.csv(as.data.frame(result_treatment),"result_treatment_sorted_ann.csv")
+
+
+```
+
